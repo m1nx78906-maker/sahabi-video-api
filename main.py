@@ -21,7 +21,6 @@ app.add_middleware(
 def home():
     return {"message": "Welcome to Sahabi Video Downloader API. System is Running!"}
 
-# টাইটেল থেকে স্পেশাল ক্যারেক্টার রিমুভ করার ফাংশন (ডাউনলোড ক্র্যাশ রোধ করতে)
 def sanitize_filename(title: str) -> str:
     sanitized = re.sub(r'[\\/*?:"<>|]', "", title)
     return sanitized.strip() or "Sahabi_Video"
@@ -29,7 +28,6 @@ def sanitize_filename(title: str) -> str:
 # ১. ভিডিওর ইনফো এবং লিংক বের করার API
 @app.get("/api/info")
 def get_video_info(url: str):
-    # ইউটিউব ব্লক করা
     if "youtube.com" in url or "youtu.be" in url:
         return {"status": "error", "message": "YouTube downloading is not supported yet."}
 
@@ -50,8 +48,6 @@ def get_video_info(url: str):
             formats_list = []
             seen_formats = set() 
             
-            # yt-dlp সাধারণত খারাপ কোয়ালিটি থেকে ভালো কোয়ালিটি সাজায়। 
-            # আমরা লিস্ট উল্টে (reverse) নিচ্ছি, যাতে ভালো কোয়ালিটি আগে চেক হয়।
             raw_formats = info.get('formats', [])
             raw_formats.reverse()
             
@@ -59,33 +55,30 @@ def get_video_info(url: str):
                 ext = f.get('ext')
                 protocol = f.get('protocol', '')
                 
-                # লাইভ স্ট্রিম (m3u8/dash) বাদ দেওয়া
                 if 'm3u8' in protocol or 'dash' in protocol:
                     continue
                 
                 vcodec = f.get('vcodec')
                 acodec = f.get('acodec')
                 
-                # যদি ভিডিও এবং অডিও কোনোটিই না থাকে
                 if vcodec == 'none' and acodec == 'none':
                     continue
 
-                # অডিও এবং ভিডিও আলাদা করার সঠিক লজিক
                 if vcodec == 'none':
                     format_type = "Audio"
                 else:
                     format_type = "Video"
-                    # শুধুমাত্র যদি কনফার্ম হওয়া যায় যে অডিও নেই (acodec == 'none'), তবেই স্কিপ করবে।
-                    # acodec যদি None (unknown) থাকে, তবে স্কিপ করবে না (এটাই আগের কোডের সমস্যা ছিল)।
                     if acodec == 'none':
                         continue 
 
-                # শুধু কাজের এক্সটেনশন নেওয়া
                 if ext not in ['mp4', 'm4a', 'mp3', 'webm']:
                     continue
 
-                # কোয়ালিটির নাম সুন্দর করা (HD, SD, 4K ইত্যাদি)
+                # কোয়ালিটি ফিক্স করা হলো (Normal Quality ইস্যু সমাধান)
                 height = f.get('height')
+                format_note = str(f.get('format_note', '')).lower()
+                format_id = str(f.get('format_id', '')).lower()
+
                 if format_type == "Audio":
                     quality = "Audio"
                 elif height:
@@ -96,9 +89,13 @@ def get_video_info(url: str):
                     elif height >= 360: quality = "360p"
                     else: quality = f"{height}p"
                 else:
-                    quality = "Normal Quality"
+                    # Height না পেলে নাম বা আইডি দেখে কোয়ালিটি বোঝার চেষ্টা করবে
+                    if '1080' in format_note or 'hd1080' in format_id: quality = "1080p (FHD)"
+                    elif '720' in format_note or 'hd720' in format_id or 'hd' in format_note: quality = "720p (HD)"
+                    elif 'sd' in format_note or 'sd' in format_id: quality = "480p (SD)"
+                    elif 'watermark' in format_note: quality = "Watermarked"
+                    else: quality = "HD/SD (Auto)" # একেবারে না পেলে এটা দেখাবে
 
-                # ডুপ্লিকেট বাটন রিমুভ করার জন্য Unique Key (যাতে একই 720p দুইবার না আসে)
                 unique_key = f"{quality}_{format_type}_{ext}"
                 
                 if unique_key not in seen_formats:
@@ -107,7 +104,7 @@ def get_video_info(url: str):
                         "type": format_type,
                         "quality": quality,
                         "ext": ext,
-                        "url": f.get('url'),
+                        "url": f.get('url'), # এই URL টাই হলো Direct Link (ফ্রন্টএন্ডে ব্যবহার করতে পারেন)
                         "size_bytes": f.get('filesize') or f.get('filesize_approx')
                     })
 
@@ -115,13 +112,14 @@ def get_video_info(url: str):
                 "status": "success",
                 "title": title,
                 "thumbnail": thumbnail,
-                "formats": formats_list # লিস্ট অলরেডি হাই-কোয়ালিটি থেকে লো-কোয়ালিটি সাজানো আছে
+                "formats": formats_list
             }
             
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# ২. Force Download API
+
+# ২. Force Download API (নষ্ট/ফেইক ডাউনলোড ফিক্স করা হলো)
 @app.get("/api/download")
 async def proxy_download(url: str, title: str = "Sahabi_Downloader", ext: str = "mp4"):
     target_url = urllib.parse.unquote(url)
@@ -129,20 +127,35 @@ async def proxy_download(url: str, title: str = "Sahabi_Downloader", ext: str = 
     filename = f"{safe_title}.{ext}"
 
     req_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
 
+    file_size = None
+    
+    # 1st Step: ভিডিওর অরিজিনাল সাইজ (Content-Length) বের করা
+    async with httpx.AsyncClient(follow_redirects=True, headers=req_headers) as client:
+        try:
+            head_req = await client.head(target_url, timeout=10.0)
+            file_size = head_req.headers.get("Content-Length")
+        except:
+            pass # সাইজ বের করতে না পারলে নরমালি ডাউনলোড হবে
+
+    # 2nd Step: ব্রাউজারকে সাইজ বলে দেওয়া, যাতে ভিডিও নষ্ট না হয়
+    response_headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"'
+    }
+    if file_size:
+        response_headers["Content-Length"] = str(file_size) # এই লাইনের কারণে ব্রাউজার প্রগ্রেস বার দেখাবে এবং ভিডিও নষ্ট হবে না
+
     async def stream_generator():
-        async with httpx.AsyncClient(follow_redirects=True, headers=req_headers, timeout=60.0) as client:
+        # timeout অনেক বাড়িয়ে দেওয়া হয়েছে যাতে বড় ভিডিও ডাউনলোড ফেল না মারে
+        async with httpx.AsyncClient(follow_redirects=True, headers=req_headers, timeout=300.0) as client:
             async with client.stream("GET", target_url) as response:
                 if response.status_code != 200:
                     yield b"Error fetching video"
                     return
-                async for chunk in response.aiter_bytes(chunk_size=1024 * 1024): 
+                # Chunk size বড় করা হয়েছে (2MB), এতে ডাউনলোড স্পিড ফাস্ট হবে
+                async for chunk in response.aiter_bytes(chunk_size=1024 * 1024 * 2): 
                     yield chunk
-
-    headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"'
-    }
     
-    return StreamingResponse(stream_generator(), headers=headers, media_type="application/octet-stream")
+    return StreamingResponse(stream_generator(), headers=response_headers, media_type="application/octet-stream")
