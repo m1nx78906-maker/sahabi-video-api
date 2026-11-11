@@ -37,8 +37,6 @@ def get_video_info(url: str):
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
-        # bestvideo+bestaudio অনেক সময় আলাদা হয়ে যায়, তাই best প্রিফার করা ভালো সাধারণ API এর জন্য
-        'format': 'best', 
     }
 
     try:
@@ -50,9 +48,14 @@ def get_video_info(url: str):
             thumbnail = info.get('thumbnail', '')
             
             formats_list = []
-            seen_formats = set() # ডুপ্লিকেট চেক করার জন্য
+            seen_formats = set() 
             
-            for f in info.get('formats', []):
+            # yt-dlp সাধারণত খারাপ কোয়ালিটি থেকে ভালো কোয়ালিটি সাজায়। 
+            # আমরা লিস্ট উল্টে (reverse) নিচ্ছি, যাতে ভালো কোয়ালিটি আগে চেক হয়।
+            raw_formats = info.get('formats', [])
+            raw_formats.reverse()
+            
+            for f in raw_formats:
                 ext = f.get('ext')
                 protocol = f.get('protocol', '')
                 
@@ -60,25 +63,26 @@ def get_video_info(url: str):
                 if 'm3u8' in protocol or 'dash' in protocol:
                     continue
                 
-                # কোডেক চেক করা (অডিও এবং ভিডিও বোঝার জন্য)
-                vcodec = str(f.get('vcodec', 'none')).lower()
-                acodec = str(f.get('acodec', 'none')).lower()
+                vcodec = f.get('vcodec')
+                acodec = f.get('acodec')
                 
-                # যদি ভিডিও এবং অডিও কোনোটিই না থাকে, তবে স্কিপ
+                # যদি ভিডিও এবং অডিও কোনোটিই না থাকে
                 if vcodec == 'none' and acodec == 'none':
                     continue
 
-                format_type = ""
-                
-                # অডিও এবং ভিডিও আলাদা করার লজিক
-                if vcodec == 'none' and acodec != 'none':
+                # অডিও এবং ভিডিও আলাদা করার সঠিক লজিক
+                if vcodec == 'none':
                     format_type = "Audio"
-                elif vcodec != 'none' and acodec != 'none':
-                    format_type = "Video" # ভিডিওর সাথে অডিও আছে
-                elif vcodec != 'none' and acodec == 'none':
-                    # এটি Mute Video (সাউন্ড নেই)। আমরা আপাতত সাউন্ড ছাড়া ভিডিও বাদ দিচ্ছি 
-                    # যাতে ইউজার অভিযোগ না করে যে "সাউন্ড নেই"।
-                    continue 
+                else:
+                    format_type = "Video"
+                    # শুধুমাত্র যদি কনফার্ম হওয়া যায় যে অডিও নেই (acodec == 'none'), তবেই স্কিপ করবে।
+                    # acodec যদি None (unknown) থাকে, তবে স্কিপ করবে না (এটাই আগের কোডের সমস্যা ছিল)।
+                    if acodec == 'none':
+                        continue 
+
+                # শুধু কাজের এক্সটেনশন নেওয়া
+                if ext not in ['mp4', 'm4a', 'mp3', 'webm']:
+                    continue
 
                 # কোয়ালিটির নাম সুন্দর করা (HD, SD, 4K ইত্যাদি)
                 height = f.get('height')
@@ -94,28 +98,24 @@ def get_video_info(url: str):
                 else:
                     quality = "Normal Quality"
 
-                # শুধু কাজের এক্সটেনশন নেওয়া
-                if ext in ['mp4', 'm4a', 'mp3', 'webm']:
-                    # ডুপ্লিকেট বাটন রিমুভ করার জন্য Unique Key তৈরি (Quality + Type + Ext)
-                    # এতে একই 720p mp4 দুইবার আসবে না
-                    unique_key = f"{quality}_{format_type}_{ext}"
-                    
-                    if unique_key not in seen_formats:
-                        seen_formats.add(unique_key)
-                        formats_list.append({
-                            "type": format_type,
-                            "quality": quality,
-                            "ext": ext,
-                            "url": f.get('url'),
-                            "size_bytes": f.get('filesize') or f.get('filesize_approx') # সাইজ থাকলে পাঠাবে
-                        })
+                # ডুপ্লিকেট বাটন রিমুভ করার জন্য Unique Key (যাতে একই 720p দুইবার না আসে)
+                unique_key = f"{quality}_{format_type}_{ext}"
+                
+                if unique_key not in seen_formats:
+                    seen_formats.add(unique_key)
+                    formats_list.append({
+                        "type": format_type,
+                        "quality": quality,
+                        "ext": ext,
+                        "url": f.get('url'),
+                        "size_bytes": f.get('filesize') or f.get('filesize_approx')
+                    })
 
             return {
                 "status": "success",
                 "title": title,
                 "thumbnail": thumbnail,
-                # লিস্টকে রিভার্স করছি যাতে হাই-কোয়ালিটি বাটনগুলো উপরে থাকে
-                "formats": formats_list[::-1] 
+                "formats": formats_list # লিস্ট অলরেডি হাই-কোয়ালিটি থেকে লো-কোয়ালিটি সাজানো আছে
             }
             
     except Exception as e:
@@ -125,23 +125,20 @@ def get_video_info(url: str):
 @app.get("/api/download")
 async def proxy_download(url: str, title: str = "Sahabi_Downloader", ext: str = "mp4"):
     target_url = urllib.parse.unquote(url)
-    # টাইটেল থেকে বাজে ক্যারেক্টার সরানো, নাহলে ব্রাউজার ডাউনলোড ফেইল করবে
     safe_title = sanitize_filename(title)
     filename = f"{safe_title}.{ext}"
 
-    # ফেক হেডার (যাতে ফেসবুক/টিকটক ব্লক না করে)
     req_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     async def stream_generator():
-        # timeout বাড়ানো হয়েছে যাতে বড় ভিডিও ডাউনলোডে এরর না আসে
         async with httpx.AsyncClient(follow_redirects=True, headers=req_headers, timeout=60.0) as client:
             async with client.stream("GET", target_url) as response:
                 if response.status_code != 200:
                     yield b"Error fetching video"
                     return
-                async for chunk in response.aiter_bytes(chunk_size=1024 * 1024): # 1MB chunks (ফাস্ট হবে)
+                async for chunk in response.aiter_bytes(chunk_size=1024 * 1024): 
                     yield chunk
 
     headers = {
