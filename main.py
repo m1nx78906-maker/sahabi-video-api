@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import yt_dlp
@@ -6,9 +6,15 @@ import httpx
 import urllib.parse
 import re
 
+# xh.py ফাইল থেকে xHamster এর রাউটার ইম্পোর্ট করা হলো
+from xh import router as xh_router
+
 app = FastAPI(title="Sahabi Video Downloader API")
 
-# CORS Setup
+# xHamster এর রাউটারটি মেইন অ্যাপের সাথে লিংক (Connect) করে দেওয়া হলো
+app.include_router(xh_router)
+
+# CORS Setup - ফ্রন্টএন্ড থেকে এক্সেস করার জন্য
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -25,9 +31,10 @@ def sanitize_filename(title: str) -> str:
     sanitized = re.sub(r'[\\/*?:"<>|]', "", title)
     return sanitized.strip() or "Sahabi_Video"
 
-# ১. ভিডিওর ইনফো এবং লিংক বের করার API
+# ১. সাধারণ ভিডিওর (FB, TikTok, IG) ইনফো বের করার API
 @app.get("/api/info")
-def get_video_info(url: str):
+def get_video_info(request: Request, url: str):
+    # ইউটিউব আপাতত ব্লক রাখা হয়েছে
     if "youtube.com" in url or "youtu.be" in url:
         return {"status": "error", "message": "YouTube downloading is not supported yet."}
 
@@ -49,12 +56,13 @@ def get_video_info(url: str):
             seen_formats = set() 
             
             raw_formats = info.get('formats', [])
-            raw_formats.reverse()
+            raw_formats.reverse() # ভালো কোয়ালিটি উপরে আনার জন্য
             
             for f in raw_formats:
                 ext = f.get('ext')
                 protocol = f.get('protocol', '')
                 
+                # লাইভ স্ট্রিম স্কিপ করা
                 if 'm3u8' in protocol or 'dash' in protocol:
                     continue
                 
@@ -68,13 +76,13 @@ def get_video_info(url: str):
                     format_type = "Audio"
                 else:
                     format_type = "Video"
-                    if acodec == 'none':
+                    if acodec == 'none': # সাউন্ড ছাড়া ভিডিও বাদ দেওয়া
                         continue 
 
                 if ext not in ['mp4', 'm4a', 'mp3', 'webm']:
                     continue
 
-                # কোয়ালিটি ফিক্স করা হলো (Normal Quality ইস্যু সমাধান)
+                # কোয়ালিটির নাম সেট করা
                 height = f.get('height')
                 format_note = str(f.get('format_note', '')).lower()
                 format_id = str(f.get('format_id', '')).lower()
@@ -89,12 +97,11 @@ def get_video_info(url: str):
                     elif height >= 360: quality = "360p"
                     else: quality = f"{height}p"
                 else:
-                    # Height না পেলে নাম বা আইডি দেখে কোয়ালিটি বোঝার চেষ্টা করবে
                     if '1080' in format_note or 'hd1080' in format_id: quality = "1080p (FHD)"
                     elif '720' in format_note or 'hd720' in format_id or 'hd' in format_note: quality = "720p (HD)"
                     elif 'sd' in format_note or 'sd' in format_id: quality = "480p (SD)"
                     elif 'watermark' in format_note: quality = "Watermarked"
-                    else: quality = "HD/SD (Auto)" # একেবারে না পেলে এটা দেখাবে
+                    else: quality = "HD/SD (Auto)" 
 
                 unique_key = f"{quality}_{format_type}_{ext}"
                 
@@ -104,7 +111,7 @@ def get_video_info(url: str):
                         "type": format_type,
                         "quality": quality,
                         "ext": ext,
-                        "url": f.get('url'), # এই URL টাই হলো Direct Link (ফ্রন্টএন্ডে ব্যবহার করতে পারেন)
+                        "url": f.get('url'), # Direct Link
                         "size_bytes": f.get('filesize') or f.get('filesize_approx')
                     })
 
@@ -119,7 +126,7 @@ def get_video_info(url: str):
         return {"status": "error", "message": str(e)}
 
 
-# ২. Force Download API (নষ্ট/ফেইক ডাউনলোড ফিক্স করা হলো)
+# ২. সাধারণ ভিডিওর Force Download API (Proxy Server)
 @app.get("/api/download")
 async def proxy_download(url: str, title: str = "Sahabi_Downloader", ext: str = "mp4"):
     target_url = urllib.parse.unquote(url)
@@ -127,7 +134,7 @@ async def proxy_download(url: str, title: str = "Sahabi_Downloader", ext: str = 
     filename = f"{safe_title}.{ext}"
 
     req_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     file_size = None
@@ -138,14 +145,14 @@ async def proxy_download(url: str, title: str = "Sahabi_Downloader", ext: str = 
             head_req = await client.head(target_url, timeout=10.0)
             file_size = head_req.headers.get("Content-Length")
         except:
-            pass # সাইজ বের করতে না পারলে নরমালি ডাউনলোড হবে
+            pass 
 
-    # 2nd Step: ব্রাউজারকে সাইজ বলে দেওয়া, যাতে ভিডিও নষ্ট না হয়
+    # 2nd Step: ব্রাউজারকে সাইজ বলে দেওয়া
     response_headers = {
         "Content-Disposition": f'attachment; filename="{filename}"'
     }
     if file_size:
-        response_headers["Content-Length"] = str(file_size) # এই লাইনের কারণে ব্রাউজার প্রগ্রেস বার দেখাবে এবং ভিডিও নষ্ট হবে না
+        response_headers["Content-Length"] = str(file_size) 
 
     async def stream_generator():
         # timeout অনেক বাড়িয়ে দেওয়া হয়েছে যাতে বড় ভিডিও ডাউনলোড ফেল না মারে
@@ -154,7 +161,7 @@ async def proxy_download(url: str, title: str = "Sahabi_Downloader", ext: str = 
                 if response.status_code != 200:
                     yield b"Error fetching video"
                     return
-                # Chunk size বড় করা হয়েছে (2MB), এতে ডাউনলোড স্পিড ফাস্ট হবে
+                # Chunk size 2MB করা হয়েছে, এতে ডাউনলোড স্পিড ফাস্ট হবে
                 async for chunk in response.aiter_bytes(chunk_size=1024 * 1024 * 2): 
                     yield chunk
     
