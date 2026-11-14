@@ -10,6 +10,7 @@ import re
 
 # xh.py থেকে xHamster রাউটার লিঙ্ক করা
 from xh import router as xh_router
+from pin import router as pin_router
 
 app = FastAPI(title="Sahabi Video Downloader API")
 
